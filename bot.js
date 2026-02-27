@@ -85,7 +85,6 @@ async function saveGalleryToGitHub(images, sha) {
   }
 }
 
-// ─── Slash Commands ───
 const commands = [
   new SlashCommandBuilder()
     .setName('galeria')
@@ -94,6 +93,16 @@ const commands = [
     .addSubcommand(sub => sub
       .setName('ver')
       .setDescription('Ver cuantas imagenes hay en la galeria'))
+    .addSubcommand(sub => sub
+      .setName('lista')
+      .setDescription('Ver lista numerada de todas las imagenes'))
+    .addSubcommand(sub => sub
+      .setName('borrar')
+      .setDescription('Borrar una imagen especifica por numero')
+      .addIntegerOption(opt => opt
+        .setName('numero')
+        .setDescription('Numero de la imagen (usa /galeria lista para ver)')
+        .setRequired(true)))
     .addSubcommand(sub => sub
       .setName('limpiar')
       .setDescription('Borrar todas las imagenes de la galeria'))
@@ -174,6 +183,33 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.reply({ embeds: [embed], ephemeral: true });
+
+    } else if (sub === 'lista') {
+      const { images } = await getGalleryFromGitHub();
+      if (images.length === 0) {
+        await interaction.reply({ content: '📸 La galeria esta vacia.', ephemeral: true });
+        return;
+      }
+      const list = images.map((img, i) => {
+        const date = new Date(img.date).toLocaleDateString('es-CO');
+        return `\`${i + 1}.\` 📷 **${img.author}** — ${date}`;
+      }).join('\n');
+      await interaction.reply({ content: `📸 **Imagenes en la galeria (${images.length}):**\n\n${list}\n\nUsa \`/galeria borrar <numero>\` para eliminar una`, ephemeral: true });
+
+    } else if (sub === 'borrar') {
+      const num = interaction.options.getInteger('numero');
+      const { images, sha } = await getGalleryFromGitHub();
+      if (num < 1 || num > images.length) {
+        await interaction.reply({ content: `❌ Numero invalido. Hay ${images.length} imagenes. Usa \`/galeria lista\` para ver.`, ephemeral: true });
+        return;
+      }
+      const removed = images.splice(num - 1, 1)[0];
+      const success = await saveGalleryToGitHub(images, sha);
+      if (success) {
+        await interaction.reply({ content: `✅ Imagen #${num} eliminada (de **${removed.author}**)\nQuedan ${images.length} imagenes.`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: '❌ Error al guardar. Intenta de nuevo.', ephemeral: true });
+      }
 
     } else if (sub === 'limpiar') {
       const { images, sha } = await getGalleryFromGitHub();
