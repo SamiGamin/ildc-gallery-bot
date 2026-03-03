@@ -267,6 +267,7 @@ client.on('messageCreate', async (message) => {
 
   let successCount = 0;
   let skippedCount = 0;
+  let lastError = '';
 
   // Obtener galería actual de GitHub
   const { images: gallery, sha } = await getGalleryFromGitHub();
@@ -288,7 +289,7 @@ client.on('messageCreate', async (message) => {
       continue;
     }
 
-    console.log(`[BOT] Descargando y subiendo: ${img.name} → ${safeName}`);
+    console.log(`[BOT] Descargando y subiendo: ${img.name} -> ${safeName}`);
     const permanentUrl = await uploadImageToGitHub(img.url, safeName);
 
     if (permanentUrl) {
@@ -300,13 +301,21 @@ client.on('messageCreate', async (message) => {
         height: img.height || 0
       });
       successCount++;
-      // Pequeña pausa entre uploads para evitar race conditions en GitHub
+      // Pequena pausa entre uploads para evitar race conditions en GitHub
       if (images.size > 1) await new Promise(r => setTimeout(r, 1000));
+    } else {
+      lastError = `Fallo al subir ${img.name || 'imagen'}`;
     }
   }
 
   if (successCount === 0) {
-    try { await message.react('❌'); } catch (e) {}
+    try { await message.react('\u274c'); } catch (e) {}
+    try {
+      await message.reply({
+        content: `\u274c Error subiendo imagen: ${lastError || 'Error desconocido'}\nRevisa la consola del bot para mas detalles.`,
+        allowedMentions: { repliedUser: false }
+      });
+    } catch (e) {}
     return;
   }
 
