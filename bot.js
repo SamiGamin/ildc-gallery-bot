@@ -3,7 +3,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Rout
 // ─── Configuración desde variables de entorno ───
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = process.env.GITHUB_REPO || 'SamiGamin/ildc-website';
+const GITHUB_REPO = process.env.GITHUB_REPO || 'SamiGamin/ildc-gallery-bot';
 const GITHUB_FILE = process.env.GITHUB_FILE || 'gallery.json';
 const CAPTURES_CHANNEL_ID = process.env.CAPTURES_CHANNEL_ID || '';
 const MAX_IMAGES = 50;
@@ -48,6 +48,43 @@ async function getGalleryFromGitHub() {
   } catch (e) {
     console.log('[ERROR] No se pudo leer gallery.json de GitHub:', e.message);
     return { images: [], sha: null };
+  }
+}
+
+// ─── GitHub API: Subir imagen al repo ───
+async function uploadImageToGitHub(imageUrl, filename) {
+  try {
+    // Descargar imagen de Discord
+    const res = await fetch(imageUrl);
+    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    const buffer = await res.arrayBuffer();
+    const base64Content = Buffer.from(buffer).toString('base64');
+
+    // Subir al repo
+    const filePath = `img/gallery/${filename}`;
+    const uploadRes = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        message: `📸 ${filename}`,
+        content: base64Content
+      })
+    });
+
+    if (!uploadRes.ok) {
+      const err = await uploadRes.json();
+      throw new Error(err.message);
+    }
+
+    // Devolver URL permanente
+    return `https://raw.githubusercontent.com/${GITHUB_REPO}/main/${filePath}`;
+  } catch (e) {
+    console.log(`[ERROR] No se pudo subir imagen: ${e.message}`);
+    return null;
   }
 }
 
@@ -124,31 +161,56 @@ client.on('messageCreate', async (message) => {
 
   if (images.size === 0) return;
 
-  console.log(`[BOT] ${images.size} imagen(es) detectada(s) de ${message.author.username}`);
+  const author = message.author.username;
+  console.log(`[BOT] ${images.size} imagen(es) detectada(s) de ${author}`);
+
+  let successCount = 0;
 
   // Obtener galería actual de GitHub
   const { images: gallery, sha } = await getGalleryFromGitHub();
 
-  // Agregar nuevas imágenes
-  images.forEach(img => {
-    gallery.push({
-      url: img.url,
-      author: message.author.username,
-      date: new Date().toISOString(),
-      width: img.width,
-      height: img.height
-    });
-  });
+  // Procesar cada imagen: descargar + subir al repo
+  for (const [, img] of images) {
+    const ext = (img.name || 'image.png').split('.').pop() || 'png';
+    const safeName = `${Date.now()}_${author}.${ext}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    console.log(`[BOT] Descargando y subiendo: ${img.name} → ${safeName}`);
+    const permanentUrl = await uploadImageToGitHub(img.url, safeName);
+
+    if (permanentUrl) {
+      gallery.push({
+        url: permanentUrl,
+        author: author,
+        date: new Date().toISOString(),
+        width: img.width || 0,
+        height: img.height || 0
+      });
+      successCount++;
+      // Pequeña pausa entre uploads para evitar race conditions en GitHub
+      if (images.size > 1) await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  if (successCount === 0) {
+    try { await message.react('❌'); } catch (e) {}
+    return;
+  }
 
   // Mantener máximo de imágenes
   while (gallery.length > MAX_IMAGES) gallery.shift();
 
-  // Guardar en GitHub
+  // Guardar gallery.json actualizado
   const success = await saveGalleryToGitHub(gallery, sha);
 
   if (success) {
     try { await message.react('📸'); } catch (e) {}
-    console.log(`[BOT] ✅ ${images.size} imagen(es) de ${message.author.username} guardada(s)`);
+    try {
+      await message.reply({
+        content: `✅ 📸 ${successCount} imagen${successCount > 1 ? 'es' : ''} guardada${successCount > 1 ? 's' : ''} en la galería web permanentemente! 🌐`,
+        allowedMentions: { repliedUser: false }
+      });
+    } catch (e) {}
+    console.log(`[BOT] ✅ ${successCount} imagen(es) de ${author} guardada(s) permanentemente`);
   } else {
     try { await message.react('❌'); } catch (e) {}
   }
