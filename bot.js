@@ -3,7 +3,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Rout
 // ─── Configuración desde variables de entorno ───
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = process.env.GITHUB_REPO || 'SamiGamin/ildc-gallery-bot';
+const GITHUB_REPO = process.env.GITHUB_REPO || 'SamiGamin/ildc-website';
 const GITHUB_FILE = process.env.GITHUB_FILE || 'gallery.json';
 const CAPTURES_CHANNEL_ID = process.env.CAPTURES_CHANNEL_ID || '';
 const MAX_IMAGES = 50;
@@ -81,7 +81,7 @@ async function uploadImageToGitHub(imageUrl, filename) {
     }
 
     // Devolver URL permanente
-    return `https://raw.githubusercontent.com/${GITHUB_REPO}/main/${filePath}`;
+    return `https://raw.githubusercontent.com/${GITHUB_REPO}/master/${filePath}`;
   } catch (e) {
     console.log(`[ERROR] No se pudo subir imagen: ${e.message}`);
     return null;
