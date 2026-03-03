@@ -143,7 +143,108 @@ const commands = [
     .addSubcommand(sub => sub
       .setName('limpiar')
       .setDescription('Borrar todas las imagenes de la galeria'))
+    .addSubcommand(sub => sub
+      .setName('sync')
+      .setDescription('Escanear #capturas y re-subir imagenes antiguas al repo')
+      .addIntegerOption(opt => opt
+        .setName('limite')
+        .setDescription('Cantidad maxima de mensajes a revisar (default: 200)')
+        .setRequired(false)))
 ].map(cmd => cmd.toJSON());
+
+// ─── Sincronizar: escanear historial del canal ───
+async function syncCapturesChannel(channel, limit = 200) {
+  // Obtener galería actual
+  const { images: gallery, sha } = await getGalleryFromGitHub();
+
+  // Set de URLs permanentes ya guardadas para evitar duplicados
+  const existingUrls = new Set();
+  const existingDiscordNames = new Set();
+  for (const img of gallery) {
+    existingUrls.add(img.url);
+    // Extraer el nombre del archivo de la URL permanente (ej: 1234_author.png)
+    const parts = img.url.split('/');
+    if (parts.length > 0) existingDiscordNames.add(parts[parts.length - 1]);
+  }
+
+  let uploaded = 0;
+  let skipped = 0;
+  let failed = 0;
+  let lastMessageId = null;
+  let totalScanned = 0;
+
+  while (totalScanned < limit) {
+    const fetchLimit = Math.min(100, limit - totalScanned);
+    const options = { limit: fetchLimit };
+    if (lastMessageId) options.before = lastMessageId;
+
+    const messages = await channel.messages.fetch(options);
+    if (messages.size === 0) break;
+
+    for (const [, message] of messages) {
+      if (message.author.bot) continue;
+
+      const imageAttachments = message.attachments.filter(att =>
+        att.contentType && att.contentType.startsWith('image/')
+      );
+
+      for (const [, img] of imageAttachments) {
+        // Verificar si ya existe como URL permanente
+        const alreadySaved = gallery.some(g =>
+          g.url.includes('raw.githubusercontent.com') &&
+          g.author === message.author.username &&
+          Math.abs(new Date(g.date).getTime() - message.createdTimestamp) < 60000
+        );
+
+        if (alreadySaved) {
+          skipped++;
+          continue;
+        }
+
+        const ext = (img.name || 'image.png').split('.').pop() || 'png';
+        const safeName = `${message.createdTimestamp}_${message.author.username}.${ext}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+        // Verificar si el archivo ya existe por nombre
+        if (existingDiscordNames.has(safeName)) {
+          skipped++;
+          continue;
+        }
+
+        console.log(`[SYNC] Subiendo: ${img.name} de ${message.author.username}`);
+        const permanentUrl = await uploadImageToGitHub(img.url, safeName);
+
+        if (permanentUrl) {
+          gallery.push({
+            url: permanentUrl,
+            author: message.author.username,
+            date: message.createdAt.toISOString(),
+            width: img.width || 0,
+            height: img.height || 0
+          });
+          existingDiscordNames.add(safeName);
+          uploaded++;
+          // Pausa para no saturar la API de GitHub
+          await new Promise(r => setTimeout(r, 1500));
+        } else {
+          failed++;
+        }
+      }
+    }
+
+    lastMessageId = messages.last().id;
+    totalScanned += messages.size;
+  }
+
+  // Mantener máximo
+  while (gallery.length > MAX_IMAGES) gallery.shift();
+
+  // Guardar gallery.json si hubo cambios
+  if (uploaded > 0) {
+    await saveGalleryToGitHub(gallery, sha);
+  }
+
+  return { uploaded, skipped, failed, totalScanned };
+}
 
 // ─── Escuchar imágenes en #capturas ───
 client.on('messageCreate', async (message) => {
@@ -165,6 +266,7 @@ client.on('messageCreate', async (message) => {
   console.log(`[BOT] ${images.size} imagen(es) detectada(s) de ${author}`);
 
   let successCount = 0;
+  let skippedCount = 0;
 
   // Obtener galería actual de GitHub
   const { images: gallery, sha } = await getGalleryFromGitHub();
@@ -173,6 +275,18 @@ client.on('messageCreate', async (message) => {
   for (const [, img] of images) {
     const ext = (img.name || 'image.png').split('.').pop() || 'png';
     const safeName = `${Date.now()}_${author}.${ext}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    // Verificar si ya existe una imagen con URL permanente del mismo autor en fecha similar
+    const isDuplicate = gallery.some(g =>
+      g.url.includes('raw.githubusercontent.com') &&
+      g.author === author &&
+      Math.abs(new Date(g.date).getTime() - Date.now()) < 5000
+    );
+
+    if (isDuplicate) {
+      skippedCount++;
+      continue;
+    }
 
     console.log(`[BOT] Descargando y subiendo: ${img.name} → ${safeName}`);
     const permanentUrl = await uploadImageToGitHub(img.url, safeName);
@@ -281,6 +395,42 @@ client.on('interactionCreate', async (interaction) => {
       }
       await saveGalleryToGitHub([], sha);
       await interaction.reply({ content: `✅ Galeria limpiada. Se eliminaron ${images.length} imagenes.`, ephemeral: true });
+
+    } else if (sub === 'sync') {
+      const limit = interaction.options.getInteger('limite') || 50;
+
+      // Necesitamos el canal de capturas
+      let channel;
+      if (CAPTURES_CHANNEL_ID) {
+        channel = await client.channels.fetch(CAPTURES_CHANNEL_ID).catch(() => null);
+      }
+      if (!channel) {
+        // Buscar canal que contenga "captura" en el nombre
+        const guild = interaction.guild;
+        channel = guild.channels.cache.find(c => c.name.includes('captura'));
+      }
+
+      if (!channel) {
+        await interaction.reply({ content: '❌ No se encontro el canal de capturas.', ephemeral: true });
+        return;
+      }
+
+      await interaction.reply({ content: `🔄 Escaneando hasta ${limit} mensajes en <#${channel.id}>...\nEsto puede tardar varios minutos. Te avisare cuando termine.`, ephemeral: true });
+
+      try {
+        const result = await syncCapturesChannel(channel, limit);
+        await interaction.followUp({
+          content: `✅ **Sincronizacion completada!**\n\n` +
+            `📊 Mensajes revisados: **${result.totalScanned}**\n` +
+            `📸 Imagenes subidas: **${result.uploaded}**\n` +
+            `⏭️ Ya existentes (omitidas): **${result.skipped}**\n` +
+            `${result.failed > 0 ? `❌ Errores: **${result.failed}**\n` : ''}`,
+          ephemeral: true
+        });
+      } catch (e) {
+        console.log('[ERROR] Sync:', e.message);
+        await interaction.followUp({ content: `❌ Error durante la sincronizacion: ${e.message}`, ephemeral: true });
+      }
     }
   }
 });
