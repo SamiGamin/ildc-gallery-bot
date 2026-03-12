@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, PermissionFlagsBits } = require('discord.js');
 
 // ─── Configuración desde variables de entorno ───
@@ -55,14 +56,23 @@ async function getGalleryFromGitHub() {
 async function uploadImageToGitHub(imageUrl, filename) {
   try {
     // Descargar imagen de Discord
+    console.log(`[UPLOAD] Descargando imagen de Discord: ${filename}`);
     const res = await fetch(imageUrl);
-    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    if (!res.ok) {
+      const errorDetail = `Discord download failed - Status: ${res.status} ${res.statusText}`;
+      console.log(`[ERROR] ${errorDetail}`);
+      return { success: false, error: errorDetail };
+    }
     const buffer = await res.arrayBuffer();
+    const sizeMB = (buffer.byteLength / (1024 * 1024)).toFixed(2);
+    console.log(`[UPLOAD] Imagen descargada (${sizeMB} MB), subiendo a GitHub...`);
     const base64Content = Buffer.from(buffer).toString('base64');
 
     // Subir al repo
     const filePath = `img/gallery/${filename}`;
-    const uploadRes = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`, {
+    const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+    console.log(`[UPLOAD] PUT ${apiUrl}`);
+    const uploadRes = await fetch(apiUrl, {
       method: 'PUT',
       headers: {
         'Authorization': `Bearer ${GITHUB_TOKEN}`,
@@ -76,15 +86,22 @@ async function uploadImageToGitHub(imageUrl, filename) {
     });
 
     if (!uploadRes.ok) {
-      const err = await uploadRes.json();
-      throw new Error(err.message);
+      let errBody = {};
+      try { errBody = await uploadRes.json(); } catch (_) {}
+      const errorDetail = `GitHub API ${uploadRes.status} ${uploadRes.statusText}: ${errBody.message || 'Sin mensaje'}` +
+        (errBody.documentation_url ? `\nDoc: ${errBody.documentation_url}` : '');
+      console.log(`[ERROR] Upload fallido:\n  Status: ${uploadRes.status}\n  Mensaje: ${errBody.message}\n  Doc: ${errBody.documentation_url || 'N/A'}`);
+      return { success: false, error: errorDetail };
     }
 
     // Devolver URL permanente
-    return `https://raw.githubusercontent.com/${GITHUB_REPO}/master/${filePath}`;
+    const permanentUrl = `https://raw.githubusercontent.com/${GITHUB_REPO}/master/${filePath}`;
+    console.log(`[UPLOAD] ✅ Subida exitosa: ${permanentUrl}`);
+    return { success: true, url: permanentUrl };
   } catch (e) {
-    console.log(`[ERROR] No se pudo subir imagen: ${e.message}`);
-    return null;
+    const errorDetail = `Excepcion: ${e.message}`;
+    console.log(`[ERROR] Upload excepcion: ${e.message}\n${e.stack}`);
+    return { success: false, error: errorDetail };
   }
 }
 
@@ -211,11 +228,11 @@ async function syncCapturesChannel(channel, limit = 200) {
         }
 
         console.log(`[SYNC] Subiendo: ${img.name} de ${message.author.username}`);
-        const permanentUrl = await uploadImageToGitHub(img.url, safeName);
+        const result = await uploadImageToGitHub(img.url, safeName);
 
-        if (permanentUrl) {
+        if (result.success) {
           gallery.push({
-            url: permanentUrl,
+            url: result.url,
             author: message.author.username,
             date: message.createdAt.toISOString(),
             width: img.width || 0,
@@ -226,6 +243,7 @@ async function syncCapturesChannel(channel, limit = 200) {
           // Pausa para no saturar la API de GitHub
           await new Promise(r => setTimeout(r, 1500));
         } else {
+          console.log(`[SYNC] ❌ Fallo: ${result.error}`);
           failed++;
         }
       }
@@ -290,11 +308,11 @@ client.on('messageCreate', async (message) => {
     }
 
     console.log(`[BOT] Descargando y subiendo: ${img.name} -> ${safeName}`);
-    const permanentUrl = await uploadImageToGitHub(img.url, safeName);
+    const result = await uploadImageToGitHub(img.url, safeName);
 
-    if (permanentUrl) {
+    if (result.success) {
       gallery.push({
-        url: permanentUrl,
+        url: result.url,
         author: author,
         date: new Date().toISOString(),
         width: img.width || 0,
@@ -304,7 +322,7 @@ client.on('messageCreate', async (message) => {
       // Pequena pausa entre uploads para evitar race conditions en GitHub
       if (images.size > 1) await new Promise(r => setTimeout(r, 1000));
     } else {
-      lastError = `Fallo al subir ${img.name || 'imagen'}`;
+      lastError = `${img.name || 'imagen'}: ${result.error}`;
     }
   }
 
@@ -312,7 +330,7 @@ client.on('messageCreate', async (message) => {
     try { await message.react('\u274c'); } catch (e) {}
     try {
       await message.reply({
-        content: `\u274c Error subiendo imagen: ${lastError || 'Error desconocido'}\nRevisa la consola del bot para mas detalles.`,
+        content: `❌ **Error subiendo imagen**\n\`\`\`\n${lastError || 'Error desconocido'}\n\`\`\``,
         allowedMentions: { repliedUser: false }
       });
     } catch (e) {}
