@@ -9,6 +9,10 @@ const GITHUB_FILE = process.env.GITHUB_FILE || 'gallery.json';
 const CAPTURES_CHANNEL_ID = process.env.CAPTURES_CHANNEL_ID || '';
 const MAX_IMAGES = 50;
 
+// ─── Debug: verificar tokens ───
+console.log(`[DEBUG] GITHUB_TOKEN: ${GITHUB_TOKEN ? GITHUB_TOKEN.substring(0, 8) + '...' + GITHUB_TOKEN.substring(GITHUB_TOKEN.length - 4) + ` (${GITHUB_TOKEN.length} chars)` : 'NO CONFIGURADO'}`);
+console.log(`[DEBUG] GITHUB_REPO: ${GITHUB_REPO}`);
+
 // ─── Validar configuración ───
 if (!DISCORD_TOKEN) {
   console.log('❌ ERROR: DISCORD_TOKEN no configurado');
