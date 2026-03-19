@@ -7,6 +7,7 @@ const GITHUB_REPO = process.env.GITHUB_REPO || 'SamiGamin/ildc-website';
 const GITHUB_FILE = process.env.GITHUB_FILE || 'gallery.json';
 const CAPTURES_CHANNEL_ID = process.env.CAPTURES_CHANNEL_ID || '';
 const MAX_IMAGES = 50;
+let botReadyTime = null;
 
 // ─── Validar configuración ───
 if (!DISCORD_TOKEN) {
@@ -55,14 +56,23 @@ async function getGalleryFromGitHub() {
 async function uploadImageToGitHub(imageUrl, filename) {
   try {
     // Descargar imagen de Discord
+    console.log(`[UPLOAD] Descargando imagen de Discord: ${filename}`);
     const res = await fetch(imageUrl);
-    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    if (!res.ok) {
+      const errorDetail = `Discord download failed - Status: ${res.status} ${res.statusText}`;
+      console.log(`[ERROR] ${errorDetail}`);
+      return { success: false, error: errorDetail };
+    }
     const buffer = await res.arrayBuffer();
+    const sizeMB = (buffer.byteLength / (1024 * 1024)).toFixed(2);
+    console.log(`[UPLOAD] Imagen descargada (${sizeMB} MB), subiendo a GitHub...`);
     const base64Content = Buffer.from(buffer).toString('base64');
 
     // Subir al repo
     const filePath = `img/gallery/${filename}`;
-    const uploadRes = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`, {
+    const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+    console.log(`[UPLOAD] PUT ${apiUrl}`);
+    const uploadRes = await fetch(apiUrl, {
       method: 'PUT',
       headers: {
         'Authorization': `Bearer ${GITHUB_TOKEN}`,
@@ -76,15 +86,22 @@ async function uploadImageToGitHub(imageUrl, filename) {
     });
 
     if (!uploadRes.ok) {
-      const err = await uploadRes.json();
-      throw new Error(err.message);
+      let errBody = {};
+      try { errBody = await uploadRes.json(); } catch (_) {}
+      const errorDetail = `GitHub API ${uploadRes.status} ${uploadRes.statusText}: ${errBody.message || 'Sin mensaje'}` +
+        (errBody.documentation_url ? `\nDoc: ${errBody.documentation_url}` : '');
+      console.log(`[ERROR] Upload fallido:\n  Status: ${uploadRes.status}\n  Mensaje: ${errBody.message}\n  Doc: ${errBody.documentation_url || 'N/A'}`);
+      return { success: false, error: errorDetail };
     }
 
     // Devolver URL permanente
-    return `https://raw.githubusercontent.com/${GITHUB_REPO}/master/${filePath}`;
+    const permanentUrl = `https://raw.githubusercontent.com/${GITHUB_REPO}/master/${filePath}`;
+    console.log(`[UPLOAD] ✅ Subida exitosa: ${permanentUrl}`);
+    return { success: true, url: permanentUrl };
   } catch (e) {
-    console.log(`[ERROR] No se pudo subir imagen: ${e.message}`);
-    return null;
+    const errorDetail = `Excepcion: ${e.message}`;
+    console.log(`[ERROR] Upload excepcion: ${e.message}\n${e.stack}`);
+    return { success: false, error: errorDetail };
   }
 }
 
@@ -201,6 +218,16 @@ async function syncCapturesChannel(channel, limit = 200) {
           continue;
         }
 
+        // Verificar por nombre original
+        const originalName = img.name || '';
+        const alreadyByName = gallery.some(g =>
+          g.originalName === originalName && g.author === message.author.username
+        );
+        if (alreadyByName) {
+          skipped++;
+          continue;
+        }
+
         const ext = (img.name || 'image.png').split('.').pop() || 'png';
         const safeName = `${message.createdTimestamp}_${message.author.username}.${ext}`.replace(/[^a-zA-Z0-9._-]/g, '_');
 
@@ -211,21 +238,23 @@ async function syncCapturesChannel(channel, limit = 200) {
         }
 
         console.log(`[SYNC] Subiendo: ${img.name} de ${message.author.username}`);
-        const permanentUrl = await uploadImageToGitHub(img.url, safeName);
+        const result = await uploadImageToGitHub(img.url, safeName);
 
-        if (permanentUrl) {
+        if (result.success) {
           gallery.push({
-            url: permanentUrl,
+            url: result.url,
             author: message.author.username,
             date: message.createdAt.toISOString(),
             width: img.width || 0,
-            height: img.height || 0
+            height: img.height || 0,
+            originalName: img.name || ''
           });
           existingDiscordNames.add(safeName);
           uploaded++;
           // Pausa para no saturar la API de GitHub
           await new Promise(r => setTimeout(r, 1500));
         } else {
+          console.log(`[SYNC] ❌ Fallo: ${result.error}`);
           failed++;
         }
       }
@@ -249,6 +278,9 @@ async function syncCapturesChannel(channel, limit = 200) {
 // ─── Escuchar imágenes en #capturas ───
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  // Ignorar mensajes anteriores al inicio del bot (evita reprocesar al reiniciar)
+  if (botReadyTime && message.createdTimestamp < botReadyTime) return;
 
   // Si hay canal configurado, solo escuchar ese canal
   if (CAPTURES_CHANNEL_ID && message.channel.id !== CAPTURES_CHANNEL_ID) return;
@@ -277,42 +309,49 @@ client.on('messageCreate', async (message) => {
     const ext = (img.name || 'image.png').split('.').pop() || 'png';
     const safeName = `${Date.now()}_${author}.${ext}`.replace(/[^a-zA-Z0-9._-]/g, '_');
 
-    // Verificar si ya existe una imagen con URL permanente del mismo autor en fecha similar
+    // Verificar si ya existe por nombre original del archivo
+    const originalName = img.name || '';
     const isDuplicate = gallery.some(g =>
-      g.url.includes('raw.githubusercontent.com') &&
-      g.author === author &&
-      Math.abs(new Date(g.date).getTime() - Date.now()) < 5000
+      g.originalName === originalName && g.author === author
     );
 
     if (isDuplicate) {
+      console.log(`[BOT] ⏭️ Duplicado detectado: ${originalName} de ${author}`);
       skippedCount++;
       continue;
     }
 
     console.log(`[BOT] Descargando y subiendo: ${img.name} -> ${safeName}`);
-    const permanentUrl = await uploadImageToGitHub(img.url, safeName);
+    const result = await uploadImageToGitHub(img.url, safeName);
 
-    if (permanentUrl) {
+    if (result.success) {
       gallery.push({
-        url: permanentUrl,
+        url: result.url,
         author: author,
         date: new Date().toISOString(),
         width: img.width || 0,
-        height: img.height || 0
+        height: img.height || 0,
+        originalName: img.name || ''
       });
       successCount++;
       // Pequena pausa entre uploads para evitar race conditions en GitHub
       if (images.size > 1) await new Promise(r => setTimeout(r, 1000));
     } else {
-      lastError = `Fallo al subir ${img.name || 'imagen'}`;
+      lastError = `${img.name || 'imagen'}: ${result.error}`;
     }
+  }
+
+  if (successCount === 0 && skippedCount > 0 && !lastError) {
+    // Todas fueron duplicados, no mostrar error
+    console.log(`[BOT] ⏭️ ${skippedCount} imagen(es) duplicada(s) de ${author}, omitidas.`);
+    return;
   }
 
   if (successCount === 0) {
     try { await message.react('\u274c'); } catch (e) {}
     try {
       await message.reply({
-        content: `\u274c Error subiendo imagen: ${lastError || 'Error desconocido'}\nRevisa la consola del bot para mas detalles.`,
+        content: `❌ **Error subiendo imagen**\n\`\`\`\n${lastError || 'Error desconocido'}\n\`\`\``,
         allowedMentions: { repliedUser: false }
       });
     } catch (e) {}
@@ -446,6 +485,7 @@ client.on('interactionCreate', async (interaction) => {
 
 // ─── Bot listo ───
 client.once('ready', async () => {
+  botReadyTime = Date.now();
   console.log('═══════════════════════════════════════');
   console.log('  📸 ILDC Gallery Bot');
   console.log(`  Bot: ${client.user.tag}`);
